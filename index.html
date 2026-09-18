@@ -199,25 +199,24 @@
         let isAudioMuted = false;
         let isVideoMuted = false;
         let pendingCandidates = [];
+        let messagesUnsubscribe = null;
 
-        // Optimized Multi-STUN Configuration for Fast Connection
-        // Enhanced STUN + Free TURN configuration for foolproof connectivity
-    const servers = {
-        iceServers: [
-            { urls: 'stun:stun.l.google.com:19302' },
-            { urls: 'stun:stun1.l.google.com:19302' },
-            { 
-                urls: 'turn:openrelay.metered.ca:80',
-                username: 'openrelayproject',
-                credential: 'openrelayproject'
-            },
-            { 
-                urls: 'turn:openrelay.metered.ca:443',
-                username: 'openrelayproject',
-                credential: 'openrelayproject'
-            }
-        ]
-    };
+        const servers = {
+            iceServers: [
+                { urls: 'stun:stun.l.google.com:19302' },
+                { urls: 'stun:stun1.l.google.com:19302' },
+                { 
+                    urls: 'turn:openrelay.metered.ca:80',
+                    username: 'openrelayproject',
+                    credential: 'openrelayproject'
+                },
+                { 
+                    urls: 'turn:openrelay.metered.ca:443',
+                    username: 'openrelayproject',
+                    credential: 'openrelayproject'
+                }
+            ]
+        };
 
         window.addEventListener('DOMContentLoaded', () => {
             setupPresenceCounter();
@@ -325,6 +324,15 @@
                 remoteVideo.classList.remove('hidden');
             };
 
+            // Setup message listener on room messages
+            messagesUnsubscribe = roomRef.child('messages');
+            messagesUnsubscribe.on('child_added', (snapshot) => {
+                const msg = snapshot.val();
+                if (msg && msg.sender !== myId) {
+                    appendMessageToUI(msg.text, 'stranger');
+                }
+            });
+
             if (isHost) {
                 dataChannel = pc.createDataChannel("chat");
                 setupDataChannelEvents();
@@ -348,13 +356,14 @@
                 });
 
                 roomRef.child('peerCandidates').on('child_added', (snapshot) => {
-                    const candidate = snapshot.val();
-                    if (candidate) {
-                        if (pc.remoteDescription) {
-                            pc.addIceCandidate(new RTCIceCandidate(candidate));
-                        } else {
-                            pendingCandidates.push(candidate);
-                        }
+                    const candidateData = snapshot.val();
+                    if (!candidateData || candidateData.candidate === "") return;
+
+                    const candidate = new RTCIceCandidate(candidateData);
+                    if (pc.remoteDescription && pc.remoteDescription.type) {
+                        pc.addIceCandidate(candidate).catch(e => console.error(e));
+                    } else {
+                        pendingCandidates.push(candidate);
                     }
                 });
 
@@ -407,21 +416,16 @@
         }
 
         function setupDataChannelEvents() {
+            if (!dataChannel) return;
             dataChannel.onopen = () => {
                 appendMessageToUI("Secure P2P data connection established!", "system");
-            };
-
-            dataChannel.onmessage = (event) => {
-                appendMessageToUI(event.data, 'stranger');
             };
 
             dataChannel.onclose = () => {
                 appendMessageToUI("Partner disconnected.", "system");
             };
 
-            // Monitor ICE connection state changes for debugging
             pc.onconnectionstatechange = () => {
-                console.log("Connection state change:", pc.connectionState);
                 if (pc.connectionState === 'failed' || pc.connectionState === 'disconnected') {
                     appendMessageToUI("Connection lost. Try skipping or restarting.", "system");
                 }
@@ -434,14 +438,17 @@
             
             if (!text) return;
             
-            if (!dataChannel || dataChannel.readyState !== 'open') {
-                appendMessageToUI("Connecting channels, please wait a moment...", "system");
-                return;
+            if (roomRef) {
+                roomRef.child('messages').push({
+                    sender: myId,
+                    text: text,
+                    timestamp: firebase.database.ServerValue.TIMESTAMP
+                });
+                appendMessageToUI(text, 'user');
+                input.value = '';
+            } else {
+                appendMessageToUI("Error: Not connected to a room.", "system");
             }
-
-            dataChannel.send(text);
-            appendMessageToUI(text, 'user');
-            input.value = '';
         };
 
         function appendMessageToUI(text, sender) {
@@ -517,6 +524,10 @@
         function cleanupSession() {
             isConnected = false;
             pendingCandidates = [];
+            if (messagesUnsubscribe) {
+                messagesUnsubscribe.off();
+                messagesUnsubscribe = null;
+            }
             if (localStream) {
                 localStream.getTracks().forEach(track => track.stop());
                 localStream = null;
